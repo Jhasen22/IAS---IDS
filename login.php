@@ -4,68 +4,76 @@ include 'db.php';
 
 $mode = $_GET['mode'] ?? 'login';
 $error = "";
-$max_attempts = 5; // Maximum allowed attempts before blocking
-$lockout_time = 300; // 5 minutes in seconds
+$max_attempts = 5;
+$lockout_time = 300;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $username = trim($_POST['username']);
     $password = trim($_POST['password']);
     $ip = $_SERVER['REMOTE_ADDR'];
 
-    // Check if user is blocked
-    $stmt = $pdo->prepare("SELECT attempts, UNIX_TIMESTAMP(last_attempt) AS last_attempt FROM failed_logins WHERE ip = ?");
-    $stmt->execute([$ip]);
-    $failed_login = $stmt->fetch();
-
-    $current_time = time();
-    $attempts = $failed_login['attempts'] ?? 0;
-    $last_attempt_time = $failed_login['last_attempt'] ?? 0;
-    
-    // If blocked, check if 5 minutes have passed
-    if ($attempts >= $max_attempts && ($current_time - $last_attempt_time) < $lockout_time) {
-        $remaining_time = $lockout_time - ($current_time - $last_attempt_time);
-        $error = "Too many failed attempts. Try again in " . ceil($remaining_time / 60) . " minutes.";
-    } else {
-        // If lockout time has passed, reset attempts
-        if ($attempts >= $max_attempts && ($current_time - $last_attempt_time) >= $lockout_time) {
-            $pdo->prepare("DELETE FROM failed_logins WHERE ip = ?")->execute([$ip]);
-            $attempts = 0;
-        }
-
-        // LOGIN LOGIC
-        $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ?");
+    if ($mode === 'register') {
+        // Check if username already exists
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM users WHERE username = ?");
         $stmt->execute([$username]);
-        $user = $stmt->fetch();
-
-        if ($user && password_verify($password, $user['password'])) {
-            $_SESSION['user'] = $user['username'];
-
-            // Reset failed login attempts on successful login
-            $pdo->prepare("DELETE FROM failed_logins WHERE ip = ?")->execute([$ip]);
-
-            header('Location: index.php');
-            exit;
+        if ($stmt->fetchColumn() > 0) {
+            $error = "Username is already taken.";
         } else {
-            // Calculate remaining attempts
-            $attempts_left = $max_attempts - $attempts - 1;
-            $error = "Invalid username or password. You have $attempts_left attempts remaining.";
-
-            // Log failed login in `intrusions` table
-            $stmt = $pdo->prepare("INSERT INTO intrusions (ip, user_agent, details, timestamp) VALUES (?, ?, ?, NOW())");
-            $stmt->execute([$ip, $_SERVER['HTTP_USER_AGENT'], "Failed login attempt for user: $username"]);
-
-            // Update failed login attempts
-            if ($failed_login) {
-                $pdo->prepare("UPDATE failed_logins SET attempts = attempts + 1, last_attempt = NOW() WHERE ip = ?")
-                    ->execute([$ip]);
+            // Hash password and insert new user
+            $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
+            $stmt = $pdo->prepare("INSERT INTO users (username, password) VALUES (?, ?)");
+            if ($stmt->execute([$username, $hashedPassword])) {
+                header('Location: login.php?mode=login&success=registered');
+                exit;
             } else {
-                $pdo->prepare("INSERT INTO failed_logins (ip, username, attempts, last_attempt) VALUES (?, ?, 1, NOW())")
-                    ->execute([$ip, $username]);
+                $error = "Registration failed. Try again.";
+            }
+        }
+    } else {
+        // LOGIN LOGIC
+        $stmt = $pdo->prepare("SELECT attempts, UNIX_TIMESTAMP(last_attempt) AS last_attempt FROM failed_logins WHERE ip = ?");
+        $stmt->execute([$ip]);
+        $failed_login = $stmt->fetch();
+
+        $current_time = time();
+        $attempts = $failed_login['attempts'] ?? 0;
+        $last_attempt_time = $failed_login['last_attempt'] ?? 0;
+
+        if ($attempts >= $max_attempts && ($current_time - $last_attempt_time) < $lockout_time) {
+            $remaining_time = $lockout_time - ($current_time - $last_attempt_time);
+            $error = "Too many failed attempts. Try again in " . ceil($remaining_time / 60) . " minutes.";
+        } else {
+            if ($attempts >= $max_attempts && ($current_time - $last_attempt_time) >= $lockout_time) {
+                $pdo->prepare("DELETE FROM failed_logins WHERE ip = ?")->execute([$ip]);
+                $attempts = 0;
             }
 
-            // If attempts are exhausted, update message
-            if ($attempts_left <= 0) {
-                $error = "Too many failed attempts. You are blocked for 5 minutes.";
+            $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ?");
+            $stmt->execute([$username]);
+            $user = $stmt->fetch();
+
+            if ($user && password_verify($password, $user['password'])) {
+                $_SESSION['user'] = $user['username'];
+                $pdo->prepare("DELETE FROM failed_logins WHERE ip = ?")->execute([$ip]);
+                header('Location: index.php');
+                exit;
+            } else {
+                $attempts_left = $max_attempts - $attempts - 1;
+                $error = "Invalid username or password. You have $attempts_left attempts remaining.";
+                $stmt = $pdo->prepare("INSERT INTO intrusions (ip, user_agent, details, timestamp) VALUES (?, ?, ?, NOW())");
+                $stmt->execute([$ip, $_SERVER['HTTP_USER_AGENT'], "Failed login attempt for user: $username"]);
+
+                if ($failed_login) {
+                    $pdo->prepare("UPDATE failed_logins SET attempts = attempts + 1, last_attempt = NOW() WHERE ip = ?")
+                        ->execute([$ip]);
+                } else {
+                    $pdo->prepare("INSERT INTO failed_logins (ip, username, attempts, last_attempt) VALUES (?, ?, 1, NOW())")
+                        ->execute([$ip, $username]);
+                }
+
+                if ($attempts_left <= 0) {
+                    $error = "Too many failed attempts. You are blocked for 5 minutes.";
+                }
             }
         }
     }
@@ -76,10 +84,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= $mode === 'login' ? 'Login' : 'Register' ?> </title>
+    <title><?= $mode === 'login' ? 'Login' : 'Register' ?></title>
     <style>
         body {
-            background-color:rgb(0, 0, 0);
+            background-color: rgb(0, 0, 0);
             display: flex;
             justify-content: center;
             align-items: center;
@@ -110,7 +118,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         .btn {
             width: 100%;
-            background:rgb(110, 110, 110);
+            background: rgb(110, 110, 110);
             color: white;
             border: none;
             padding: 10px;
@@ -119,7 +127,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-weight: bold;
         }
         .btn:hover {
-            background:rgb(110, 110, 110);
+            background: rgb(110, 110, 110);
         }
         .error {
             color: red;
@@ -131,16 +139,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             font-size: 14px;
         }
         .toggle-link a {
-            color:rgb(255, 140, 0);
+            color: rgb(255, 140, 0);
             text-decoration: none;
         }
     </style>
 </head>
 <body>
-
     <div class="container">
         <div class="logo">Welcome to Liljhass Realm</div>
         <?php if (!empty($error)) echo "<p class='error'>$error</p>"; ?>
+        <?php if (isset($_GET['success']) && $_GET['success'] === 'registered') echo "<p class='success' style='color: green;'>Registration successful! You can now log in.</p>"; ?>
         <form method="post">
             <input type="text" name="username" placeholder="Username" required>
             <input type="password" name="password" placeholder="Password" required>
@@ -151,6 +159,5 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                  : "Already have an account? <a href='login.php?mode=login'>Log in</a>" ?>
         </div>
     </div>
-
 </body>
 </html>
